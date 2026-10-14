@@ -2,7 +2,7 @@
 // @name               IG Saver
 // @name:zh-CN         IG Saver - Instagram 原图/视频无损下载
 // @namespace          https://github.com/teddy4556/ig-saver
-// @version            0.3.72
+// @version            0.3.73
 // @description        一键下载 Instagram Post / Reels / Stories / Highlights / Avatar 原图和视频。
 // @description:zh-CN  原图最高 3072w + Reels 音视频自动合成有声 MP4 + 14 个文件名占位符。Console 第一行打印 [IG-SAVER-<版本号>] 启动行,对不上说明装的是旧版。
 // @author             teddy4556
@@ -26,6 +26,8 @@
 // @compatible         chrome >= 100
 // @compatible         edge >= 100
 // @compatible         firefox >= 100
+// @icon64             https://raw.githubusercontent.com/teddy4556/ig-saver/main/assets/logo-128.png
+// @icon               https://raw.githubusercontent.com/teddy4556/ig-saver/main/assets/logo-32.png
 // @license            MIT
 // @run-at             document-idle
 // ==/UserScript==
@@ -59,7 +61,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.72';
+  const VERSION = '0.3.73';
   const NS = 'ig-saver';
 
   // v0.3.72:IG 移动端 UA 提到模块作用域。
