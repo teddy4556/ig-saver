@@ -2,7 +2,7 @@
 // @name               IG Saver
 // @name:zh-CN         IG Saver - Instagram 原图/视频无损下载
 // @namespace          https://github.com/teddy4556/ig-saver
-// @version            0.3.64
+// @version            0.3.65
 // @description        Download original photos and full videos (with audio) from Instagram posts, reels, stories, highlights and avatars.
 // @description:zh-CN  一键下载 Instagram 帖子的原图与完整有声视频。支持普通帖 / Reels / Stories / Highlights / 头像,多图组可整组下载,文件名模板可自定义。
 // @author             teddy4556
@@ -56,7 +56,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.64';
+  const VERSION = '0.3.65';
   const NS = 'ig-saver';
 
   // ============================================================
@@ -528,19 +528,27 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
       return url;
     };
     const addItem = (node, idx) => {
-      const isVideo = !!node.video_url || !!node.video_versions || !!node.video_dash_manifest;
+      // v0.3.65:isVideo 判定放宽 —— IG 某些视频只在 clip / dash_abr_media 等字段出现
+      const isVideo = !!node.video_url || !!node.video_versions?.length || !!node.video_dash_manifest
+        || !!node.dash_info?.video_dash_manifest || !!node.clip?.video_dash_manifest;
       // v0.3.0:优先 video_dash_manifest 里的最高码率 mp4
       let url;
       if (isVideo) {
         // v0.3.58:优先 DASH(最高码率)+ audio URL
         if (node.video_dash_manifest && typeof parseDashMPA === 'function') {
           const parsed = parseDashMPA(node.video_dash_manifest);
+          // v0.3.65:audio url **独立**取值 —— 原代码只在 video 命中时才设 _dash_audio_url,
+          //    导致「manifest 有 audio 但 video 分支没走通」时音轨被整个丢掉(用户反馈「视频没合并」)
+          node._dash_audio_url = parsed?.audio?.[0]?.url || null;
+          if (!node._dash_audio_url && parsed?.all?.length) {
+            console.warn(`[IG-SAVER-${VERSION}] manifest 有 ${parsed.all.length} reps 但没识别出音轨 —— 该视频可能本就无声`);
+          }
           if (parsed?.video?.length) {
-            const best = parsed.video.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+            const best = parsed.video[0];
             if (best?.url) {
-              console.log(`[IG-SAVER-${VERSION}] 选 DASH 视频: ${best.width}x${best.height} @ ${best.bandwidth}bps`);
+              console.log(`[IG-SAVER-${VERSION}] 选 DASH 视频: ${best.width}x${best.height} @ ${best.bandwidth}bps`
+                + (node._dash_audio_url ? ' + 有音轨' : ' + 无音轨'));
               url = best.url;
-              node._dash_audio_url = parsed.audio?.[0]?.url;
             }
           }
         }
@@ -577,6 +585,8 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
         takenAt: m.taken_at_timestamp || m.taken_at || Date.now() / 1000,
         idx,
         _dashAudioUrl: node._dash_audio_url,
+        _dashManifest: node.video_dash_manifest || null,
+        _noAudioTrack: !node._dash_audio_url,
       });
     };
 
@@ -733,14 +743,31 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
         const bandwidth = parseInt(rep.getAttribute('bandwidth') || '0', 10) || 0;
         const width = parseInt(rep.getAttribute('width') || '0', 10) || 0;
         const height = parseInt(rep.getAttribute('height') || '0', 10) || 0;
-        return { url: base, mimeType, contentType, bandwidth, width, height };
+        const codecs = rep.getAttribute('codecs') || '';
+        const subtype = set?.getAttribute('subtype') || '';
+        return { url: base, mimeType, contentType, codecs, subtype, bandwidth, width, height };
       }).filter(Boolean);
-      const isVideo = (c) => ((c.contentType || '').includes('video') || (c.mimeType || '').startsWith('video'));
-      const isAudio = (c) => ((c.contentType || '').includes('audio') || (c.mimeType || '').startsWith('audio'));
-      return {
-        video: candidates.filter(isVideo).sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0)),
-        audio: candidates.filter(isAudio).sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0)),
+      // v0.3.65:分类判定放宽(用户反馈「视频没合并」)。
+      // 原判定用 includes/startsWith,**大小写敏感**,且只看 contentType + mimeType 两个字段。
+      // DASH 标准里音视频标记可能出现在:mimeType 前缀、contentType、codecs 字符串、
+      // 甚至只在 AdaptationSet 上而 Representation 上为空。全都小写化后合并判断。
+      const blobOf = (c) => `${c.contentType || ''} ${c.mimeType || ''} ${c.codecs || ''} ${c.subtype || ''}`.toLowerCase();
+      const isVideo = (c) => {
+        const b = blobOf(c);
+        return b.includes('video') || b.includes('avc') || b.includes('hev') || b.includes('hvc')
+            || b.includes('vp9') || b.includes('vp8') || b.includes('av01');
       };
+      const isAudio = (c) => {
+        const b = blobOf(c);
+        return b.includes('audio') || b.includes('mp4a') || b.includes('ac-3') || b.includes('ec-3')
+            || b.includes('opus') || b.includes('aac') || b.includes('vorbis');
+      };
+      const video = candidates.filter(isVideo).sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+      const audio = candidates.filter(isAudio).sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+      // v0.3.65:诊断日志 —— 一眼看出 manifest 里到底有没有音轨
+      console.log(`[IG-SAVER-${VERSION}] parseDashMPA: ${candidates.length} reps → video=${video.length} audio=${audio.length}`
+        + (audio.length === 0 ? ' (⚠️ 无音轨,可能 IG 该视频本就无声,或分类未命中)' : ''));
+      return { video, audio, all: candidates };
     } catch (e) {
       console.warn(`[IG-SAVER-${VERSION}] parseDashMPA 失败:`, e);
       return null;
@@ -1179,7 +1206,15 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
   // v0.3.58:DASH 视频下载(video-only mp4 + audio-only m4a → Mediabunny mux → 完整 mp4)
   const downloadDashVideo = async (item, opts = {}) => {
     const { silent = false } = opts;
-    if (!item._dashAudioUrl) return await downloadItem(item, opts);
+    if (!item._dashAudioUrl) {
+      // v0.3.65:走到这里说明没音轨 —— 明确告诉用户「为什么没合并」,而不是静默出一个无声视频
+      if (item._dashManifest) {
+        console.log(`[IG-SAVER-${VERSION}] 该视频 manifest 内无音轨(IG 数据本身无声轨),跳过合并`);
+      } else {
+        console.log(`[IG-SAVER-${VERSION}] 该视频无 DASH manifest,直接下 video_url(可能本就含音频)`);
+      }
+      return await downloadItem(item, opts);
+    }
     try {
       if (!silent) showProgress(`下视频+音频 ${item.shortcode} #${item.idx}…`);
       const [vBuf, aBuf] = await Promise.all([
