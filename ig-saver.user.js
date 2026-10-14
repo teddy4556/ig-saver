@@ -2,9 +2,9 @@
 // @name               IG Saver
 // @name:zh-CN         IG Saver - Instagram 原图/视频无损下载
 // @namespace          https://github.com/teddy4556/ig-saver
-// @version            0.3.65
-// @description        Download original photos and full videos (with audio) from Instagram posts, reels, stories, highlights and avatars.
-// @description:zh-CN  一键下载 Instagram 帖子的原图与完整有声视频。支持普通帖 / Reels / Stories / Highlights / 头像,多图组可整组下载,文件名模板可自定义。
+// @version            0.3.72
+// @description        一键下载 Instagram Post / Reels / Stories / Highlights / Avatar 原图和视频。
+// @description:zh-CN  原图最高 3072w + Reels 音视频自动合成有声 MP4 + 14 个文件名占位符。Console 第一行打印 [IG-SAVER-<版本号>] 启动行,对不上说明装的是旧版。
 // @author             teddy4556
 // @match              https://www.instagram.com/*
 // @match              https://*.instagram.com/*
@@ -20,6 +20,9 @@
 // @connect            i.instagram.com
 // @connect            www.instagram.com
 // @connect            cdn.jsdelivr.net
+// @connect            scontent.cdninstagram.com
+// @connect            *.cdninstagram.com
+// @connect            *.fbcdn.net
 // @compatible         chrome >= 100
 // @compatible         edge >= 100
 // @compatible         firefox >= 100
@@ -56,8 +59,14 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.65';
+  const VERSION = '0.3.72';
   const NS = 'ig-saver';
+
+  // v0.3.72:IG 移动端 UA 提到模块作用域。
+  // v0.3.71 及之前(全部 61 个归档版本)这行缩进为 0,看着像顶层,实际落在 getPostMedia 函数体内(368-507),
+  // getStories / getHighlightStories 引用它 → 运行时 ReferenceError → Story / Highlights 按钮 100% 失效。
+  // 顺带修 UA typo:'Pixel 7 XL)Build/' 少一个空格。
+  const IG_MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; Pixel 7 XL) Build/RP1A.20845.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/5.0 Chrome/117.0.5938.60 Mobile Safari/537.36 Instagram 307.0.0.34.111';
 
   // ============================================================
   // 启动确认 + 全局错误捕获
@@ -269,7 +278,8 @@
     const headers = isBare
       ? { Accept: '*/*', ...(opts.headers || {}) }
       : {
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Pixel 7 XL)Build/RP1A.20845.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/5.0 Chrome/117.0.5938.60 Mobile Safari/537.36 Instagram 307.0.0.34.111',
+          // v0.3.72:改引模块作用域的 IG_MOBILE_UA(原来这里是内联字面量,和第 380 行重复两份,typo 也一样)
+          'User-Agent': IG_MOBILE_UA,
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9',
           ...(opts.headers || {}),
@@ -377,8 +387,8 @@
 
     const appId = getAppID();
     // 关键:SN 原版用 Instagram 307.0.0.34.111 移动端 UA,桌面 web UA 被 IG 当 web 风控
-const IG_MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; Pixel 7 XL)Build/RP1A.20845.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/5.0 Chrome/117.0.5938.60 Mobile Safari/537.36 Instagram 307.0.0.34.111';
-const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
+    // v0.3.72:IG_MOBILE_UA 已提到模块作用域(见文件头),这里只保留 headers 局部变量
+    const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
     if (appId) headers['X-IG-App-ID'] = appId;
 
     // 2. 0.3.41 跳过 query_hash(实测必返 400,IG 2026 已弃用 query_hash 路径,只留 query_id 9496392173716084)
@@ -899,19 +909,43 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
         diagnostic.push({ topKeys, hasXdt, hasSc, hasCarousel, hasImgV2, size: text.length });
       }
 
-      const collect = (node) => {
+      // v0.3.72 三处修:
+      //  1) collect(node, inheritedSc) —— 子节点继承父 shortcode(carousel 子节点自身没有 code/shortcode,
+      //     v0.3.71 拿不到 shortcode → harvest 产出的 item.shortcode 全是 undefined → downloadItem 的
+      //     HD cache 分支直接短路,graphql 路径的原图缓存永远用不上)
+      //  2) isTarget 过滤 —— v0.3.71 收了 targetShortcode 参数但从不使用,feed 注水有多个帖时
+      //     点 A 帖会连带下到 B 帖的图
+      //  3) 新增 video_dash_manifest 分支 —— v0.3.71 完全不看 manifest,Reels 只拿到封面 jpg,
+      //     且产出的 item 没有 _dashAudioUrl → runOne 的 mux 分支永远进不去
+      const collect = (node, inheritedSc) => {
         if (!node || typeof node !== 'object') return;
-        if (Array.isArray(node)) { node.forEach(collect); return; }
+        if (Array.isArray(node)) { node.forEach((x) => collect(x, inheritedSc)); return; }
 
-        const sc = node.shortcode || node.code;
-        // v0.3.58:不强制 shortcode 匹配(主页注水最外层可能没有 shortcode,递归进去才匹配)
-        // 只在拿到 image_versions2/carousel_media/video_versions 时再判
+        const sc = node.shortcode || node.code || inheritedSc;
+        const isTarget = !targetShortcode || !sc || sc === targetShortcode;
 
         const owner = node.owner?.username || node.user?.username || 'unknown';
         const takenAt = node.taken_at_timestamp || node.taken_at || Date.now() / 1000;
         const pk = node.id || node.pk;
 
-        if (pk) {
+        // v0.3.72(3):DASH 视频 —— 必须在 image_versions2 分支之前,视频帖不该下封面图
+        if (pk && isTarget && node.video_dash_manifest && typeof parseDashMPA === 'function') {
+          const parsed = parseDashMPA(node.video_dash_manifest);
+          if (parsed?.video?.length) {
+            const best = parsed.video[0];
+            result.push({
+              mediaId: pk, isVideo: true, url: best.url,
+              shortcode: sc, owner, takenAt, idx: result.length + 1,
+              _width: best.width || 0,
+              _dashAudioUrl: parsed.audio?.[0]?.url || null,
+              _dashManifest: node.video_dash_manifest,
+              _source: 'page-harvest',
+            });
+            return;   // 视频帖不再推封面图
+          }
+        }
+
+        if (pk && isTarget) {
           if (node.video_versions?.length) {
             const v = node.video_versions[0];
             if (v?.url) {
@@ -957,20 +991,26 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
           });
         }
         if (node.edge_sidecar_to_children?.edges) {
-          node.edge_sidecar_to_children.edges.forEach((e) => collect(e.node));
+          node.edge_sidecar_to_children.edges.forEach((e) => collect(e.node, sc));
         }
         // 递归所有 data/xdt_api 包裹
-        if (node.data) collect(node.data);
+        if (node.data) collect(node.data, sc);
         if (node.xdt_api__v1__media__shortcode__web_info) {
           const xdt = node.xdt_api__v1__media__shortcode__web_info;
-          // 抓 items[]
-          if (Array.isArray(xdt.items)) xdt.items.forEach(collect);
-          if (xdt.items?.[0]) collect(xdt.items[0]);
+          // v0.3.72:删掉 `if (xdt.items?.[0]) collect(xdt.items[0])`
+          // 原代码 forEach 之后又单收 items[0] → 每个帖的第 1 张图必然被收两遍
+          // (实测:单图帖 2 items,三图 carousel 6 items)
+          if (Array.isArray(xdt.items)) xdt.items.forEach((it) => collect(it, sc));
         }
       };
 
-      collect(data);
-      if (result.length) break;
+      collect(data, null);
+      // v0.3.72:命中目标帖才 break。v0.3.71 是 `if (result.length) break`,
+      // 第一个注水 script 只要有任意媒体就 break → feed 上抓到别的帖就直接放弃目标帖
+      const hitTarget = targetShortcode
+        ? result.some((r) => r.shortcode === targetShortcode)
+        : result.length > 0;
+      if (hitTarget) break;
     }
     if (diagnostic.length) {
       console.log(`[IG-SAVER-${VERSION}] harvest 诊断 (${diagnostic.length} 个相关注水):`, JSON.stringify(diagnostic, null, 0).slice(0, 800));
@@ -1005,28 +1045,45 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
           }
           // GraphImage / GraphVideo / GraphSidecar 节点
           if (node.display_resources || node.image_versions2) {
-            const candidates = node.display_resources || [];
-            for (let i = 0; i < candidates.length; i++) {
-              const c = candidates[i];
-              const w = c.config_width || c.width || 0;
-              const url = c.src;
-              if (!url) continue;
-              const shortcodeKey = node.shortcode || node.code;
-              // 从 URL pathname 也拿(短码在 path 上,通常是 /p/<shortcode>/)
-              const pathMatch = location.pathname.match(/\/(?:[\w.\-_]+\/)?p\/?([\w-]+)/);
-              const fallbackSC = pathMatch?.[1];
-              const raw = `${shortcodeKey || fallbackSC || 'unknown'}__${i}`;
-              hdCacheSet(raw, url, w);
-              count++;
-            }
-            // image_versions2 取最宽
-            if (node.image_versions2?.candidates?.length) {
-              const sorted = [...node.image_versions2.candidates].sort((a, b) => (b.width || 0) - (a.width || 0));
-              const c = sorted[0];
-              if (c?.url) {
-                const raw = `${node.shortcode || node.code || 'unknown'}__hd`;
-                hdCacheSet(raw, c.url, c.width || 0);
+            // v0.3.69:HD cache 只允许存**原图**。原代码把 display_resources 全部按索引写入,
+            //    导致 __0 可能命中 640w 缩略图,下载到的不是原图。
+            //    修法:display_resources 只取**最宽的一张**写进 __0,且宽度 < 1080 时直接不写
+            //    (display_resources 本身最多 1080w,达不到原图级别,宁可不写也不要写错的)。
+            const shortcodeKey = node.shortcode || node.code;
+            const pathMatch = location.pathname.match(/\/(?:[\w.\-_]+\/)?p\/?([\w-]+)/);
+            const fallbackSC = pathMatch?.[1];
+            const cacheSC = shortcodeKey || fallbackSC || 'unknown';
+            // 宽度取值口径跟 pickMaxImage 对齐:width 优先,再 config_width
+            const widthOf = (c) => (c?.width || c?.config_width || 0);
+
+            // ---- display_resources:只写最宽的,且必须 >= 1080 ----
+            const dr = node.display_resources || [];
+            if (dr.length) {
+              const sortedDr = [...dr].sort((a, b) => widthOf(b) - widthOf(a));
+              const bestDr = sortedDr[0];
+              const bw = widthOf(bestDr);
+              const burl = bestDr?.src || bestDr?.url;
+              if (burl && bw >= 1080) {
+                hdCacheSet(`${cacheSC}__0`, burl, bw);
                 count++;
+              } else if (burl) {
+                console.log(`[IG-SAVER-${VERSION}] display_resources 最宽仅 ${bw}w(<1080),不写 cache,避免污染原图位`);
+              }
+            }
+
+            // ---- image_versions2:原图字段,取最宽写入 __hd 和 __0(覆盖 display_resources 的缩略图) ----
+            const iv = node.image_versions2?.candidates || [];
+            if (iv.length) {
+              const sortedIv = [...iv].sort((a, b) => widthOf(b) - widthOf(a));
+              const bestIv = sortedIv[0];
+              const iw = widthOf(bestIv);
+              const iurl = bestIv?.url || bestIv?.src;
+              if (iurl) {
+                hdCacheSet(`${cacheSC}__hd`, iurl, iw);
+                // v0.3.69:__0 是 downloadItem 主要查的索引位,必须写原图而不是缩略图
+                hdCacheSet(`${cacheSC}__0`, iurl, iw);
+                count++;
+                console.log(`[IG-SAVER-${VERSION}] HD cache 写入 ${cacheSC}: ${iw}w ← 原图`);
               }
             }
           }
@@ -1112,7 +1169,8 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
   GM_addStyle(`
     .ig-saver-fab {
       position: absolute;
-      width: 32px; height: 32px; border-radius: 50%;
+      /* v0.3.66:32px → 26px(缩小以塞进图片右缘外的窄边距) */
+      width: 26px; height: 26px; border-radius: 50%;
       background: rgba(0,0,0,.7); color: #fff;
       display: flex; align-items: center; justify-content: center;
       cursor: pointer; z-index: 9999;
@@ -1121,7 +1179,9 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
     }
     .ig-saver-fab:hover { background: rgba(0,0,0,.9) !important; transform: scale(1.1); }
     .ig-saver-fab:active { transform: scale(.95); }
-    .ig-saver-fab-pair { display: flex; gap: 6px; }
+    /* v0.3.68:两个按钮改为**竖排**(column)—— 用户要求。
+       顺带好处:胶囊宽度从 ~66px 降到 ~36px,更贴图片右缘,也不容易压到图片 */
+    .ig-saver-fab-pair { display: flex; flex-direction: column; gap: 4px; }
     .ig-saver-fab-pair .ig-saver-fab { position: relative; }
     .ig-saver-progress {
       position: fixed; top: 20px; right: 20px; z-index: 2147483647;
@@ -1274,12 +1334,17 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
       const hdKey = `${item.shortcode}__${item.idx - 1}`;
       const hd = hdCacheGet(hdKey);
       if (hd?.url) {
-        console.log(`[IG-SAVER-${VERSION}] HD cache 命中: ${hd.width}w ← ${hd.url.slice(0, 80)}...`);
-        url = hd.url;
+        // v0.3.69:保险 —— cache 里若残留历史缩略图(<1080),宁可丢弃也不能用它替换原图 URL
+        if ((hd.width || 0) >= 1080) {
+          console.log(`[IG-SAVER-${VERSION}] HD cache 命中: ${hd.width}w ← 原图`);
+          url = hd.url;
+        } else {
+          console.log(`[IG-SAVER-${VERSION}] HD cache 丢弃: ${hd.width}w < 1080(疑似缩略图),用主路径 URL`);
+        }
       } else {
         const hdKey2 = `${item.shortcode}__hd`;
         const hd2 = hdCacheGet(hdKey2);
-        if (hd2?.url) {
+        if (hd2?.url && (hd2.width || 0) >= 1080) {
           console.log(`[IG-SAVER-${VERSION}] HD cache 命中(sidecar): ${hd2.width}w`);
           url = hd2.url;
         }
@@ -1307,8 +1372,8 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
   // ============================================================
   // v0.2.0 新增:Feed 内联 FAB
   // ============================================================
-  const SVG_DW = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/></svg>';
-  const SVG_DW_ALL = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v9"/><path d="m8 17 4 4 4-4"/><path d="M4 7h16"/><path d="M4 11h10"/></svg>';
+  const SVG_DW = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/></svg>';
+  const SVG_DW_ALL = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v9"/><path d="m8 17 4 4 4-4"/><path d="M4 7h16"/><path d="M4 11h10"/></svg>';
 
   const MOUNT_ATTR = 'data-ig-saver-mounted';
 
@@ -1365,13 +1430,35 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
   // 选图信号改用 srcset 最大宽度(懒加载时也可靠,不依赖渲染尺寸):
   //   头像 = 32w/58w/150w,媒体图 = 640w/750w/1080w/1440w → 阈值 500w
 
+  // v0.3.70:统一 srcset 描述符解析。
+  // 原代码三处只认 w 描述符,遇到 x 描述符(2x/3x)全部返回 0。
+  // 症状:用户日志 `deepExtract: top 3: ['0w VIS']` —— 宽度解析失败,排序失效,拿不到原图。
+  // 本函数:w 描述符直接取数;x 描述符乘以基准宽度(naturalWidth/clientWidth);
+  //          两者都没有时用 img 真实渲染宽度兜底。
+  const parseSrcsetWidth = (desc, imgEl) => {
+    try {
+      const d = String(desc || '').trim();
+      // 描述符为空 → 直接用 img 真实宽度兜底(而不是返回 0,否则排序失效)
+      if (!d) return imgEl ? (imgEl.naturalWidth || imgEl.clientWidth || imgEl.width || 0) : 0;
+      const wm = d.match(/(\d+(?:\.\d+)?)w/);
+      if (wm) return Math.round(parseFloat(wm[1]));
+      const xm = d.match(/(\d+(?:\.\d+)?)x/);
+      if (xm) {
+        const base = (imgEl && (imgEl.naturalWidth || imgEl.clientWidth || imgEl.width)) || 0;
+        return base ? Math.round(parseFloat(xm[1]) * base) : 0;
+      }
+      if (imgEl) return imgEl.naturalWidth || imgEl.clientWidth || imgEl.width || 0;
+      return 0;
+    } catch { return 0; }
+  };
+
   const maxSrcsetWidth = (el) => {
     try {
       const ss = el.getAttribute('srcset') || '';
       let mx = 0;
       for (const part of ss.split(',')) {
-        const m = part.trim().match(/(\d+)w/);
-        if (m) mx = Math.max(mx, parseInt(m[1], 10));
+        const w = parseSrcsetWidth(part.trim(), el);
+        if (w > mx) mx = w;
       }
       return mx;
     } catch { return 0; }
@@ -1379,27 +1466,45 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
 
   const pickMediaTarget = (article) => {
     const imgs = Array.from(article.querySelectorAll('img[src], img[srcset]'));
+    // v0.3.71:统一排除头像 —— 三条路径都必须过滤。
+    // v0.3.70 回归根因:只有第 1 条(srcset≥500)有 alt/header 过滤,后两条没有;
+    // 当第 1 条落空掉到第 2 条时会选中用户头像 → 按钮坐标跳到页面左边(用户反馈「按钮自动到左边了」)。
+    const isAvatar = (img) => {
+      if (img.closest('header')) return true;
+      const alt = (img.getAttribute('alt') || '').toLowerCase();
+      if (/profile picture|个人资料|头像|profile photo|用户照片/.test(alt)) return true;
+      const blob = (img.src || '') + ' ' + (img.getAttribute('srcset') || '');
+      if (/avatar|s150x150|s320x320/.test(blob)) return true;
+      return false;
+    };
+
+    // 1) srcset 宽度信号(懒加载也可靠)
     let best = null, bestW = 0;
     for (const img of imgs) {
-      if (img.closest('header')) continue;
-      const alt = (img.getAttribute('alt') || '').toLowerCase();
-      if (/profile picture|个人资料|头像|profile photo/.test(alt)) continue;
+      if (isAvatar(img)) continue;
       const mw = maxSrcsetWidth(img);
       if (mw >= 500 && mw > bestW) { bestW = mw; best = img; }
     }
     if (best) return best;
+
+    // 2) 退路:非头像里渲染尺寸最大的图(v0.3.71:加 isAvatar 过滤 + 宽度下限提到 200)
     let bw = 0;
     for (const img of imgs) {
-      if (img.closest('header')) continue;
+      if (isAvatar(img)) continue;
       const r = img.getBoundingClientRect();
       if (r.width > bw) { bw = r.width; best = img; }
     }
-    if (best && bw >= 80) return best;
+    if (best && bw >= 200) return best;
+
+    // 3) 视频帖
     const vid = article.querySelector('video');
     if (vid) {
       const r = vid.getBoundingClientRect();
-      if (r.width >= 80) return vid;
+      if (r.width >= 200) return vid;
     }
+    // 4) 全落空 → 明确返回 null,由 injectArticleFAB 打日志并下个 tick 重试
+    //    (绝不用「猜测」的目标去定位,否则按钮会跑到莫名其妙的位置)
+    console.log(`[IG-SAVER-${VERSION}] pickMediaTarget: 没找到媒体图(${imgs.length} 个 img 全被判定为头像/太小),稍后重试`);
     return null;
   };
 
@@ -1410,8 +1515,17 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
       if (!ir.width || !ir.height || !ar.width || !ar.height) return false;
       if (ir.width < 40 || ir.height < 40) return false;
       wrap.style.position = 'absolute';
-      wrap.style.top = Math.round((ir.top - ar.top) + 12) + 'px';
-      wrap.style.left = Math.round((ir.left - ar.left) + 12) + 'px';
+      // v0.3.66:按钮挪到图片**右侧外部**(用户红框标注:图片右缘外的空白边距,不压图片)
+      //    top  = 图片顶部 + 12px(与图片顶对齐)
+      //    left = 图片右缘 + 8px(完全在图片外,留一点间距)
+      const TOP_INSET = 12;    // 距图片顶部
+      // v0.3.67:SIDE_GAP 8 → 14 —— 用户截图红框实测在图片右缘外 x=763..833(离右缘 753 有 10px 起点),
+      //    而按钮总宽约 66px;gap=8 时按钮左边会落在 x=724,仍压住图片 29px。
+      //    gap=14 才能让按钮整体落在图片右缘之外。
+      // v0.3.68:14 → 10 —— 竖排后按钮宽度从 66px 降到 36px,可以更贴近图片边缘
+      const SIDE_GAP = 10;     // 距图片右缘
+      wrap.style.top = Math.round((ir.top - ar.top) + TOP_INSET) + 'px';
+      wrap.style.left = Math.round((ir.right - ar.left) + SIDE_GAP) + 'px';
       return true;
     } catch { return false; }
   };
@@ -1437,8 +1551,11 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
     const wrap = document.createElement('div');
     wrap.className = 'ig-saver-fab-pair';
     // v0.3.63:图片框内左上角(0.3.58 右下 → 0.3.60 误挂 article → 0.3.61/0.3.62 兜底 → 0.3.63 真挂)
-    wrap.style.cssText = 'position:absolute;z-index:9999;display:flex;gap:6px;background:rgba(0,0,0,0.65);border-radius:20px;padding:4px 6px;backdrop-filter:blur(4px);';
-    wrap.dataset.pos = 'img-inner-top-left';
+    // v0.3.66:按钮缩小(32→26px,间距 6→4,padding 4x6→3x5)—— 两按钮总宽约 60px,
+    //    配合「图片右侧外部」定位,才能塞进图片右缘外那条窄边距
+    // v0.3.68:竖排胶囊 —— 圆角收小一点更贴合竖长条形状
+    wrap.style.cssText = 'position:absolute;z-index:9999;display:flex;flex-direction:column;gap:4px;background:rgba(0,0,0,0.65);border-radius:16px;padding:4px 4px;backdrop-filter:blur(4px);';
+    wrap.dataset.pos = 'img-right-outside';
     wrap.dataset.igReposition = '1';
 
     // 算不出位置(图片懒加载中)→ 放弃本次挂载,下个 tick 自动重试
@@ -1519,7 +1636,7 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
           for (const c of srcset.split(',').map(s => s.trim()).filter(Boolean)) {
             const parts = c.split(' ');
             const url = parts[0];
-            const w = parseInt((parts[1] || '').match(/(\d+)w/)?.[1] || '0');
+            const w = parseSrcsetWidth(parts[1], img);
             sources.push({ url, width: w });
           }
         }
@@ -1596,7 +1713,7 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
         for (const c of candidates) {
           const parts = c.split(' ');
           const url = parts[0];
-          const w = parseInt((parts[1] || '').match(/(\d+)w/)?.[1] || '0');
+          const w = parseSrcsetWidth(parts[1], img);
           if (w > bestWidth) { bestWidth = w; bestUrl = url; }
         }
         if (!bestUrl) bestUrl = img.src;
@@ -1699,7 +1816,10 @@ const headers = { 'User-Agent': IG_MOBILE_UA, Accept: '*/*' };
           //    A. video_dash_manifest 有,但 parseDashMPA 没拿到 audio(IG 视频本身可能没音轨)
           //    B. video_dash_manifest 也没,只有 video_url 或 video_versions
           //    两种都先下 video_url,然后看 item._noAudioTrack 决定
-          if (item.video_dash_manifest && !item._dashAudioUrl) {
+          // v0.3.72:字段名修正。v0.3.71 读 item.video_dash_manifest,但 extractPostItems / 新增的 harvest
+      //    分支产出的字段叫 _dashManifest → 这个判断恒 false → 无音轨 Reels 静默走 downloadItem
+      //    直接下 DASH video-only,用户拿到无声视频且无任何提示(v0.3.65 想修的问题在这条分支上没修到)
+          if (item._dashManifest && !item._dashAudioUrl) {
             console.log(`[IG-SAVER-${VERSION}] 视频 #${item.idx} DASH 解析只到 video,无 audio(IG Reels 无音轨)`);
           } else {
             console.log(`[IG-SAVER-${VERSION}] 视频 #${item.idx} 走 video_url/video_versions(无 DASH manifest)`);
