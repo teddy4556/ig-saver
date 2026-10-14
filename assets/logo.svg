@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="IG Saver">
+  <!--
+    IG Saver 图标 v1.1.1
+    squircle 圆角方 + IG 官方品牌渐变 + 白色下载箭头(轮廓同脚本内 SVG_DW)
+    描边:深梅紫 #4A0C26 @ 36%,解决白符号落在亮橙上对比度不足(1.84:1)
+  -->
+  <defs>
+    <linearGradient id="iggrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0.000" stop-color="#833AB4"/>
+      <stop offset="0.200" stop-color="#C13584"/>
+      <stop offset="0.400" stop-color="#E1306C"/>
+      <stop offset="0.600" stop-color="#FD1D1D"/>
+      <stop offset="0.800" stop-color="#F77737"/>
+      <stop offset="1.000" stop-color="#FCB045"/>
+    </linearGradient>
+    <path id="arrow" d="M 256 320 V 64
+                        M 149.3 213.3 L 256 320 L 362.7 213.3
+                        M 448 320 V 405.3
+                        M 405.3 448 L 106.7 448
+                        M 64 405.3 V 320"/>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#iggrad)"/>
+
+  <!-- 描边层:同一轮廓 +20.5px 外扩 -->
+  <use href="#arrow" fill="none" stroke="#4A0C26" stroke-opacity="0.36"
+       stroke-width="76.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 主体层:纯白 -->
+  <use href="#arrow" fill="none" stroke="#FFFFFF"
+       stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
