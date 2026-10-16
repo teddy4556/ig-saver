@@ -2,7 +2,7 @@
 // @name               IG Saver
 // @name:zh-CN         IG Saver - Instagram 原图/视频无损下载
 // @namespace          https://github.com/teddy4556/ig-saver
-// @version            0.3.73
+// @version            0.3.82
 // @description        一键下载 Instagram Post / Reels / Stories / Highlights / Avatar 原图和视频。
 // @description:zh-CN  原图最高 3072w + Reels 音视频自动合成有声 MP4 + 14 个文件名占位符。Console 第一行打印 [IG-SAVER-<版本号>] 启动行,对不上说明装的是旧版。
 // @author             teddy4556
@@ -61,7 +61,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.73';
+  const VERSION = '0.3.82';
   const NS = 'ig-saver';
 
   // v0.3.72:IG 移动端 UA 提到模块作用域。
@@ -1172,18 +1172,34 @@
     .ig-saver-fab {
       position: absolute;
       /* v0.3.66:32px → 26px(缩小以塞进图片右缘外的窄边距) */
-      width: 26px; height: 26px; border-radius: 50%;
-      background: rgba(0,0,0,.7); color: #fff;
+      width: 28px; height: 28px; border-radius: 50%;
+      /* ★ v0.3.82 美化:默认态【无底色】,只有图标 —— 干净通透,不压照片。
+         原来是 rgba(0,0,0,.7) 常驻,套在胶囊里就成了「黑饼叠黑底」。
+         底色改到 :hover / :focus-visible 才出现(见下)。 */
+      background: transparent; color: #fff;
       display: flex; align-items: center; justify-content: center;
-      cursor: pointer; z-index: 9999;
-      backdrop-filter: blur(4px);
-      transition: transform .15s, background .15s;
+      cursor: pointer; z-index: 99999;
+      /* v0.3.78:显式 pointer-events:auto —— 宿主链任一层带 pointer-events:none 时,
+         按钮会变成「看得见但点不到」(视频帖实证:探针捕获次数=0)。这里钉死。 */
+      pointer-events: auto;
+      /* 白色描边光晕:图标压在亮照片上也看得清(比纯白 fill 稳) */
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,.55));
+      transition: transform .18s cubic-bezier(.2,.7,.3,1),
+                  background-color .18s, box-shadow .18s;
     }
-    .ig-saver-fab:hover { background: rgba(0,0,0,.9) !important; transform: scale(1.1); }
-    .ig-saver-fab:active { transform: scale(.95); }
+    /* ★ hover / 键盘聚焦时才出圆形底 —— 默认态干净,交互态明确 */
+    .ig-saver-fab:hover,
+    .ig-saver-fab:focus-visible {
+      background-color: rgba(0,0,0,.55);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.22);
+      transform: scale(1.12);
+      outline: none;
+    }
+    .ig-saver-fab:active { transform: scale(.94); }
     /* v0.3.68:两个按钮改为**竖排**(column)—— 用户要求。
        顺带好处:胶囊宽度从 ~66px 降到 ~36px,更贴图片右缘,也不容易压到图片 */
-    .ig-saver-fab-pair { display: flex; flex-direction: column; gap: 4px; }
+    /* ★ v0.3.82:28px 圆钮 + 3px 间距,比例比 26px+4px 更匀称 */
+    .ig-saver-fab-pair { display: flex; flex-direction: column; gap: 3px; }
     .ig-saver-fab-pair .ig-saver-fab { position: relative; }
     .ig-saver-progress {
       position: fixed; top: 20px; right: 20px; z-index: 2147483647;
@@ -1332,7 +1348,9 @@
     let url = item.url;
 
     // v0.3.58:优先查 HD cache(单帖页 harvest 进来的 1440w)
-    if (item.shortcode && item.idx !== undefined) {
+    // v0.3.77:防御 —— 视频 item 绝不能被图片 HD cache 覆盖 URL
+    //   (纯护栏,当前唯一视频入口已绕过 cache,这里防将来新增路径踩坑)
+    if (!item.isVideo && item.shortcode && item.idx !== undefined) {
       const hdKey = `${item.shortcode}__${item.idx - 1}`;
       const hd = hdCacheGet(hdKey);
       if (hd?.url) {
@@ -1467,6 +1485,12 @@
   };
 
   const pickMediaTarget = (article) => {
+    // v0.3.76:【视频优先】先看 video,再走 img 路径。
+    //   不这么排的话,视频帖的封面 <img> 会被 srcset 路径抢先 return,
+    //   按钮挂到封面上 —— 这就是「视频帖按钮消失」的真凶。
+    const vidFirst = article.querySelector('video');
+    if (vidFirst) return vidFirst;
+
     const imgs = Array.from(article.querySelectorAll('img[src], img[srcset]'));
     // v0.3.71:统一排除头像 —— 三条路径都必须过滤。
     // v0.3.70 回归根因:只有第 1 条(srcset≥500)有 alt/header 过滤,后两条没有;
@@ -1499,10 +1523,15 @@
     if (best && bw >= 200) return best;
 
     // 3) 视频帖
+    // v0.3.76:视频帖的「封面」本身就是 img,会被路径1/2 抢先命中并 return ——
+    //    返回的是封面 img,坐标系落到封面上,按钮看着像「消失」。
+    //    修法:有真实渲染出来的 <video> 时**优先返回 video 本身**,
+    //    让按钮挂视频框而不是封面图。宽度门槛从 200 放宽到 1
+    //    (未播放的 video 可能宽度 0,但 parentElement 仍是有效宿主)。
     const vid = article.querySelector('video');
     if (vid) {
       const r = vid.getBoundingClientRect();
-      if (r.width >= 200) return vid;
+      if (r.width >= 1) return vid;
     }
     // 4) 全落空 → 明确返回 null,由 injectArticleFAB 打日志并下个 tick 重试
     //    (绝不用「猜测」的目标去定位,否则按钮会跑到莫名其妙的位置)
@@ -1510,61 +1539,145 @@
     return null;
   };
 
-  const placeInArticle = (wrap, article, target) => {
+  // v0.3.75:【纯 CSS 锚定,零 JS 坐标计算】
+  //   按钮 wrap 直接包住媒体元素自身 -> wrap 的盒子 = 媒体盒子。
+  //   再用 CSS top/right 内缩定位。媒体动 -> wrap 跟着动 -> 结构性不漂。
+  const INSIDE = 12;   // 距媒体框右缘(v0.3.80 真身是 15,见 cssText)
+  // ★ v0.3.81:让开 IG 右上角的「关注」按钮(用户反馈挡住了)。
+  //   关注按钮在帖子卡片右上角、头像行那一层,高度约 40-48px。
+  //   同一坑 v0.3.54 撞过一次(用户原话「按钮和关注重叠」),
+  //   当时解法是挪右下角;这次保持在右上,改为【往下让开】。
+  const AVOID_FOLLOW = 48;
+
+  // v0.3.80:【照抄 IG Helper 4.2.2 的容器选择】—— 九版根因收口
+  //   IG Helper 真身(GreasyFork 404535 / SN-Koarashi/ig-helper@master)line 1320:
+  //       const $childElement = $mainElement.children("div").children("div");
+  //   固定两层 children() 拿到 IG 自己的媒体容器 —— **不猜、不算、不找**。
+  //   我此前九版都在自己造坐标系(pickMediaTarget + findHost 猜祖先),
+  //   猜错就漂/点不到。而 IG 自己的容器正是视频覆盖层(z=1)所在的那个 context,
+  //   挂进去 z-index:1 就够,不必拼 99999(拼了也没用,不在同一 context 不比较)。
+  //   另:IG Helper line 1332 会把轮播计数器 ._acay + .x24i39r 下移到 37px 让位,
+  //   这里照抄同款避让逻辑。
+  const findIgMediaContainer = (article) => {
     try {
-      const ir = target.getBoundingClientRect();
-      const ar = article.getBoundingClientRect();
-      if (!ir.width || !ir.height || !ar.width || !ar.height) return false;
-      if (ir.width < 40 || ir.height < 40) return false;
-      wrap.style.position = 'absolute';
-      // v0.3.66:按钮挪到图片**右侧外部**(用户红框标注:图片右缘外的空白边距,不压图片)
-      //    top  = 图片顶部 + 12px(与图片顶对齐)
-      //    left = 图片右缘 + 8px(完全在图片外,留一点间距)
-      const TOP_INSET = 12;    // 距图片顶部
-      // v0.3.67:SIDE_GAP 8 → 14 —— 用户截图红框实测在图片右缘外 x=763..833(离右缘 753 有 10px 起点),
-      //    而按钮总宽约 66px;gap=8 时按钮左边会落在 x=724,仍压住图片 29px。
-      //    gap=14 才能让按钮整体落在图片右缘之外。
-      // v0.3.68:14 → 10 —— 竖排后按钮宽度从 66px 降到 36px,可以更贴近图片边缘
-      const SIDE_GAP = 10;     // 距图片右缘
-      wrap.style.top = Math.round((ir.top - ar.top) + TOP_INSET) + 'px';
-      wrap.style.left = Math.round((ir.right - ar.left) + SIDE_GAP) + 'px';
-      return true;
-    } catch { return false; }
+      const kids = article.children;
+      for (let i = 0; i < kids.length; i++) {
+        if (kids[i].tagName !== 'DIV') continue;
+        const second = kids[i].children;
+        for (let j = 0; j < second.length; j++) {
+          if (second[j].tagName !== 'DIV') continue;
+          const cand = second[j];
+          // 必须有实际渲染面积,且不是外层大容器(排除只含文字/头像的壳)
+          const r = cand.getBoundingClientRect();
+          if (r.width > 40 && r.height > 40) {
+            // 面积要接近媒体区(不能是整条 article 那么大),否则多半选错壳
+            const ar = article.getBoundingClientRect();
+            if (ar.height > 0 && r.height < ar.height * 0.98) return cand;
+          }
+        }
+      }
+    } catch (e) { /* noop */ }
+    return null;
   };
 
-  const repositionMountedFABs = () => {
-    document.querySelectorAll('.ig-saver-fab-pair[data-ig-reposition]').forEach((wrap) => {
-      const a = wrap.__igArticle, t = wrap.__igTarget;
-      if (a && t && document.contains(a)) placeInArticle(wrap, a, t);
-    });
+  // v0.3.80:照抄 IG Helper —— 主动把 IG 自己的轮播计数器挪开,给按钮让位
+  const dodgeIgCounter = (article) => {
+    try {
+      const acay = article.querySelector('._acay');
+      if (!acay) return;
+      const next = acay.nextElementSibling;
+      if (next) next.style.top = '37px';
+    } catch (e) { /* noop */ }
   };
 
-  const injectArticleFAB = (article) => {
-    if (article.getAttribute(MOUNT_ATTR) === '1') return;
-    const shortcode = getShortcodeFromArticle(article);
-    if (!shortcode) return;
+  // v0.3.79:【覆盖层父容器】视频帖专用。
+  //   IG 的视频区有一层 position:absolute + z-index:1 的覆盖层(吃点击的)。
+  //   探针实测(用户):盖住按钮的就是它 cls=x10l6tqk x13vifvy。
+  //   我的 wrap 与它**不在同一 stacking context**,所以 z-index:99999 无效。
+  //   修法:挂到它的**父容器**,且该父容器 z-index 必须是 auto(不建 context),
+  //        这样 wrap 与覆盖层同 context → z-index 直接可比 → 99999 赢。
+  //   判据:position:relative 且 z-index ��为 auto。找不到返回 null(走老 findHost)。
+  const findOverlayParent = (article, target) => {
+    let n = target && target.parentElement;
+    for (let i = 0; i < 10 && n; i++) {
+      if (n === article) break;
+      if (article.contains(n)) {
+        const cs = getComputedStyle(n);
+        if (cs.position === 'relative' && cs.zIndex === 'auto') return n;
+      }
+      n = n.parentElement;
+    }
+    return null;
+  };
 
-    // v0.3.64:选媒体根 + 算坐标;图片没加载出尺寸就 return,不设 MOUNT_ATTR → 1s 后 tick 自动重试
-    const target = pickMediaTarget(article);
-    if (!target) return;
+  // v0.3.76:【host 兜底链】找一个「能当定位上下文」的宿主。
+  //   判据(全部几何实测,不猜 class 名):
+  //     · 在 article 内
+  //     · 有实际渲染面积(w>20 && h>20)
+  //     · 自己不是 display:contents(那种不生成盒子,挂上去等于没挂)
+  //   从 target.parentElement 起最多上溯 8 层;全不合格 → 返回 null(交由日志暴露)。
+  const findHost = (article, target) => {
+    let n = target && target.parentElement;
+    for (let i = 0; i < 8 && n; i++) {
+      if (n === article) break;
+      if (article.contains(n)) {
+        const r = n.getBoundingClientRect();
+        const cs = getComputedStyle(n);
+        if (cs.display !== 'contents' && r.width > 20 && r.height > 20) return n;
+      }
+      n = n.parentElement;
+    }
+    // 兜底:article 一定有面积 —— 但要确认它自己也合格,不合格就真的没救了
+    const ar = article.getBoundingClientRect();
+    if (ar.width > 20 && ar.height > 20) return article;
+    return null;
+  };
 
-    article.style.position = 'relative';
+  // v0.3.76:定位失败的结构化诊断(每个 shortcode 只打一次,避免刷屏)
+  const diagSeen = new Set();
+  const diagOnce = (shortcode, target, host) => {
+    if (diagSeen.has(shortcode)) return;
+    diagSeen.add(shortcode);
+    try {
+      const chain = [];
+      let n = target && target.parentElement;
+      for (let i = 0; i < 5 && n; i++) {
+        const r = n.getBoundingClientRect(), cs = getComputedStyle(n);
+        chain.push(n.tagName + ' ' + Math.round(r.width) + 'x' + Math.round(r.height)
+          + ' d=' + cs.display + ' p=' + cs.position + ' ov=' + cs.overflow);
+        n = n.parentElement;
+      }
+      console.log('[IG-SAVER-' + VERSION + '] 定位失败 ' + shortcode
+        + ' | tag=' + (target && target.tagName)
+        + ' | video=' + !!document.querySelector('video')
+        + ' | host=' + (host ? host.tagName : 'null') + '\n  祖先链: ' + chain.join('\n         '));
+    } catch (e) {
+      console.log('[IG-SAVER-' + VERSION + '] 定位失败 ' + shortcode + '(diag 异常)', e);
+    }
+  };
 
+  const buildPair = (article, shortcode, target) => {
     const wrap = document.createElement('div');
     wrap.className = 'ig-saver-fab-pair';
-    // v0.3.63:图片框内左上角(0.3.58 右下 → 0.3.60 误挂 article → 0.3.61/0.3.62 兜底 → 0.3.63 真挂)
-    // v0.3.66:按钮缩小(32→26px,间距 6→4,padding 4x6→3x5)—— 两按钮总宽约 60px,
-    //    配合「图片右侧外部」定位,才能塞进图片右缘外那条窄边距
-    // v0.3.68:竖排胶囊 —— 圆角收小一点更贴合竖长条形状
-    wrap.style.cssText = 'position:absolute;z-index:9999;display:flex;flex-direction:column;gap:4px;background:rgba(0,0,0,0.65);border-radius:16px;padding:4px 4px;backdrop-filter:blur(4px);';
-    wrap.dataset.pos = 'img-right-outside';
-    wrap.dataset.igReposition = '1';
-
-    // 算不出位置(图片懒加载中)→ 放弃本次挂载,下个 tick 自动重试
-    if (!placeInArticle(wrap, article, target)) {
-      console.log(`[IG-SAVER-${VERSION}] ${shortcode}: 图片未加载出尺寸,稍后重试定位`);
-      return;
-    }
+    // position:absolute 挂在 target 旁边;top/right 是 CSS 固定内缩,不依赖任何测量
+    // v0.3.78:z-index 9999 → 99999 + 显式 pointer-events:auto
+    //   探针实证(用户实测 捕获次数=0):视频帖按钮「看得见点不到」——
+    //   IG 的视频交互层盖在上面吃掉了 click。9999 与 IG 内部层同量级不够稳。
+    // v0.3.80:样式对齐 IG Helper .button_wrapper 真身
+    //   top/right 15、z-index 1、row-reverse 横排、gap 8、blur(8px)、radius 12
+    //   ★ z-index 用 1 不是 99999 —— 进了 IG 自己的容器后,
+    //     与视频覆盖层(z=1)同 context,DOM 在后即生效,不需要拼数值。
+    wrap.style.cssText = 'position:absolute;z-index:1;pointer-events:auto;line-height:0;'
+      + 'display:flex;flex-flow:row-reverse;gap:8px;'
+      // ★ v0.3.82 美化:胶囊只留「极淡玻璃」,不再是一道灰黑框。
+      //   底色降到 .18 + 保留 blur(8px) → 照片透上来,胶囊像一层薄玻璃。
+      + 'background:rgba(0,0,0,0.18);border:1px solid rgba(255,255,255,0.14);'
+      + 'border-radius:14px;padding:5px 6px;backdrop-filter:blur(10px) saturate(1.4);'
+      + '-webkit-backdrop-filter:blur(10px) saturate(1.4);'
+      // 投影改柔和一档(原来 0 4px 12px/.2 偏重,小控件显得笨)
+      + 'box-shadow:0 2px 10px rgba(0,0,0,0.18);'
+      + 'top:' + AVOID_FOLLOW + 'px;right:' + INSIDE + 'px;';
+    wrap.dataset.pos = 'media-inside-below-follow';
 
     const fabCur = document.createElement('div');
     fabCur.className = 'ig-saver-fab ig-saver-fab-current';
@@ -1578,18 +1691,90 @@
     fabAll.innerHTML = SVG_DW_ALL;
     fabAll.addEventListener('click', async (e) => { e.preventDefault(); e.stopPropagation(); await runDownloadAll(article, shortcode); });
 
-    wrap.appendChild(fabCur);
+    // ★ v0.3.81 用户要求:调换「下载单个」/「下载全部」上下位置。
+    //   wrap 是 flex-direction:column(竖排),DOM 顺序 = 视觉上下顺序,
+    //   后 append 的显示在更下面。
+    //   改成先 all(下载全部→上)后 cur(下载当前→下)。
+    //   ★ 处理器仍绑在各自节点上,顺序换了不影响功能。
     wrap.appendChild(fabAll);
-    // 坐标已由 placeInArticle 算好(相对 article),直接挂 article
+    wrap.appendChild(fabCur);
     wrap.__igArticle = article;
-    wrap.__igTarget = target;
+    return wrap;
+  };
+
+  const injectArticleFAB = (article) => {
+    if (article.getAttribute(MOUNT_ATTR) === '1') return;
+    const shortcode = getShortcodeFromArticle(article);
+    if (!shortcode) return;
+
+    // v0.3.75:拿媒体元素(几何尺寸只用于「是不是图」筛除,不用于算坐标)
+    const target = pickMediaTarget(article);
+    if (!target) return;
+
+    // v0.3.76:【host 兜底链】parentElement 未必是能渲染的坐标系。
+    //   视频帖的 <video> 常被 display:contents / 零面积中间层包着 ——
+    //   wrap 挂上去坐标系没面积,按钮就渲染不出来(v0.3.75 的消失真凶)。
+    //   逐级上溯,取第一个「有面积 + 在 article 内 + 本身可见」的祖先。
+    // v0.3.80:【主修】优先挂到 IG 自己的媒体容器(照抄 IG Helper children×2)
+    //   拿不到才退回 v0.3.79 的兜底链 —— 图片帖路径不回退。
+    const igBox = findIgMediaContainer(article);
+    const host = igBox || findOverlayParent(article, target) || findHost(article, target);
+    if (!host) {
+      diagOnce(shortcode, target, null);
+      return;
+    }
+    dodgeIgCounter(article);
+    host.style.position = host.style.position || 'relative';
+
+    const wrap = buildPair(article, shortcode, target);
+    // 坐标系 = host 本身(媒体框或其最近可渲染祖先),CSS top/right 内缩,零 JS 测量。
+    // v0.3.78:【本版主修】insertBefore(wrap, target) → appendChild(wrap)
+    //   老写法把 wrap 插到 <video> **之前** = DOM 顺序在 video 前面,
+    //   同层 positioned 元素里后出现的 video 叠在 wrap 之上,
+    //   加上 IG 的播放/静音/进度条层 → wrap 被完全遮蔽,点不到。
+    //   appendChild 让 wrap 排到 video **之后** = 叠在上面。
+    //   注:坐标系仍由 host 提供(CSS top/right 内缩),换挂载顺序不改变定位。
+    host.appendChild(wrap);
     article.setAttribute(MOUNT_ATTR, '1');
-    article.appendChild(wrap);
+  };
+
+  // v0.3.77:判断 article 是不是视频帖(有 <video> 或 <video> 类容器)
+  const articleHasVideo = (article) => {
+    if (!article) return false;
+    if (article.querySelector('video')) return true;
+    try {
+      return !!article.querySelector('video, [data-video-id], [class*="Video"]');
+    } catch (e) { return false; }
   };
 
   const runDownloadCurrent = async (article, shortcode) => {
     toast(`⏳ 解析 ${shortcode} …`, 1500);
-    // v0.3.58:深挖 article 节点所有 img(找最高位原图)
+
+    // v0.3.77:【按媒体类型分流 —— 本版主修】
+    //   老 bug:deepExtractMaxHighImages 排第一,而它只认 <img> 且 items.push
+    //   硬编码 isVideo:false。视频帖 article 里**有封面 <img>**,必然被它截胡 →
+    //   视频主链 getPostMedia 永远走不到 → 点了没反应。
+    //   修法:视频帖直接跳视频主链,图片帖一字不改。
+    if (articleHasVideo(article)) {
+      console.log(`[IG-SAVER-${VERSION}] runDownloadCurrent: 视频帖,跳过图片辅助函数,直走视频主链`);
+      const vpost = await getPostMedia(shortcode);
+      const vitems = vpost && vpost.items ? vpost.items : [];
+      if (!vitems.length) {
+        toast(`❌ ${shortcode} 没取到视频(看 console 日志)`, 4000, 'error');
+        return;
+      }
+      const vitem = vitems[0];
+      if (!vitem.url) {
+        toast(`❌ ${shortcode} 视频 URL 为空(DASH/video_url 都没拿到)`, 4000, 'error');
+        return;
+      }
+      console.log(`[IG-SAVER-${VERSION}] 视频帖命中:isVideo=${!!vitem.isVideo} url=${String(vitem.url).slice(0, 90)}...`);
+      const vok = await downloadItem(vitem);
+      toast(vok ? `✅ 已保存 ${shortcode} 视频` : `❌ ${shortcode} 视频保存失败`, 3000, vok ? 'success' : 'error');
+      return;
+    }
+
+    // v0.3.58:深挖 article 节点所有 img(找最高位原图)—— 图片帖原路径,行为不变
     let dom = deepExtractMaxHighImages(article, shortcode);
     if (!dom || !dom.items.length) {
       dom = getPostMediaFromArticle(article, shortcode);
@@ -2055,7 +2240,7 @@
     const href = location.href;
     if (href === currentURL) {
       mountFeedFABs();
-      repositionMountedFABs();   // v0.3.64:图片懒加载完成/布局变化后重新对齐
+      // v0.3.75:不再需要 reposition —— 按钮靠 CSS 锚定在媒体框上,媒体动它自动跟
       return;
     }
     currentURL = href;
